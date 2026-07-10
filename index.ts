@@ -28,7 +28,7 @@ function first(...vals: unknown[]): string | undefined {
   return undefined
 }
 
-const plugin: Plugin = async ({ $, directory }, options: Options = {}) => {
+const plugin: Plugin = async ({ directory }, options: Options = {}) => {
   const backend = (first(options.backend, process.env.NOTIFY_BACKEND) as Backend) || "bark"
   const barkUrl = first(options.bark_url, process.env.BARK_URL)?.replace(/\/+$/, "")
   const ntfyUrl = first(options.ntfy_url, process.env.NTFY_URL)?.replace(/\/+$/, "")
@@ -44,17 +44,21 @@ const plugin: Plugin = async ({ $, directory }, options: Options = {}) => {
           console.error("[opencode-push] BARK_URL not set; skipping notification")
           return
         }
-        const url: string = barkUrl
-        const payload = JSON.stringify({ title: fullTitle, body, group: "opencode" })
-        await $`curl -s -m 10 -X POST -H "Content-Type: application/json" -d ${payload} ${url}`
+        await fetch(barkUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: fullTitle, body, group: "opencode" }),
+        })
       } else if (backend === "ntfy") {
         if (!ntfyUrl) {
           console.error("[opencode-push] NTFY_URL not set; skipping notification")
           return
         }
-        const endpoint: string = `${ntfyUrl}/${ntfyTopic}`
-        const titleHeader: string = `Title: ${fullTitle}`
-        await $`curl -s -m 10 -H ${titleHeader} -H "Tags: opencode" -d ${body} ${endpoint}`
+        await fetch(`${ntfyUrl}/${ntfyTopic}`, {
+          method: "POST",
+          headers: { Title: fullTitle, Tags: "opencode" },
+          body,
+        })
       }
     } catch (err) {
       console.error("[opencode-push] notification failed:", err)
