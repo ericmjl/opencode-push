@@ -43,20 +43,52 @@ Add to `~/.config/opencode/opencode.json`:
 
 ## Configure
 
-Configuration is read from plugin options first, then environment variables.
-For a local (from-source) install there are no plugin options, so use env vars
-(in your shell rc: `~/.zshrc` on macOS, `~/.bashrc` on Linux).
+Configuration is read with the following precedence (highest first):
 
-### Bark (default)
+1. **Plugin options** (npm install, via the config `plugin` tuple)
+2. **Environment variables** (`BARK_URL`, `NTFY_URL`, `NTFY_TOPIC`,
+   `NOTIFY_BACKEND`, `NOTIFY_HOST`)
+3. **Config file** (`~/.config/opencode-push.json`)
+4. Built-in defaults
+
+All three sources use the same key names: `backend`, `bark_url`, `ntfy_url`,
+`ntfy_topic`, `host`.
+
+### Config file (recommended)
+
+Create `~/.config/opencode-push.json`:
+
+```json
+{
+  "backend": "bark",
+  "bark_url": "https://api.day.app/<your-key>",
+  "host": "mac"
+}
+```
+
+The config file is the recommended way to configure the plugin:
+
+- It keeps secrets (your Bark key) out of the shell environment.
+- It works under **any launcher**. opencode invocations from a TUI, from a
+  scheduler such as [opencode-scheduler](https://github.com/ericmjl/opencode-scheduler)
+  (launchd/systemd), or from a GUI app all read the same file, because the
+  plugin opens it itself at load time. Env vars in a shell rc are not seen by
+  non-shell launchers.
+
+See `config.example.json` for a template.
+
+### Environment variables
+
+Env vars override the config file, which is useful for CI or one-off overrides:
 
 ```bash
 export BARK_URL="https://api.day.app/<your-key>"   # from the Bark iOS app
 export NOTIFY_HOST="mac"                            # optional label per machine
 ```
 
-That is enough. `NOTIFY_BACKEND` defaults to `bark`.
+`NOTIFY_BACKEND` defaults to `bark`.
 
-### ntfy (self-hosted)
+ntfy:
 
 ```bash
 export NOTIFY_BACKEND="ntfy"
@@ -83,9 +115,10 @@ The same keys exist for ntfy: `ntfy_url`, `ntfy_topic`.
 
 ## Per-machine setup
 
-The same `BARK_URL` (Bark key) is used on every machine, because they all push
-to the same phone. Set `NOTIFY_HOST` differently per machine (`mac`, `gb10`) so
-the notification tells you which one finished.
+The same `bark_url` (Bark key) is used on every machine, because they all push
+to the same phone. Set `host` differently per machine (`mac`, `gb10`) so the
+notification tells you which one finished. Each machine has its own config file
+(`~/.config/opencode-push.json`) for that.
 
 ## Notes
 
