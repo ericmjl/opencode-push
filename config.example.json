@@ -1,0 +1,5 @@
+{
+  "backend": "bark",
+  "bark_url": "https://api.day.app/REPLACE_WITH_YOUR_KEY",
+  "host": "mac"
+}

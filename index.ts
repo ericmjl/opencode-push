@@ -4,12 +4,22 @@ import type { Plugin } from "@opencode-ai/plugin"
 // Fires on session.idle (a turn finished) and session.error.
 // Backends: "bark" (Apple APNs via api.day.app) or "ntfy" (self-hosted ntfy.sh).
 //
-// Configuration (plugin options take precedence over env vars):
+// Configuration precedence (highest first):
+//   1. Plugin options (npm install: ["opencode-push", {...}])
+//   2. Environment variables (see below)
+//   3. Config file (~/.config/opencode-push.json)
+//   4. Built-in defaults
+//
+// Keys (same names in plugin options, env vars, and the config file):
 //   backend     : "bark" | "ntfy"   (env NOTIFY_BACKEND, default "bark")
 //   bark_url    : e.g. https://api.day.app/<your-key>   (env BARK_URL)
 //   ntfy_url    : e.g. http://gb10                     (env NTFY_URL)
 //   ntfy_topic  : topic name                            (env NTFY_TOPIC, default "opencode")
 //   host        : label appended to the title, e.g. mac / gb10  (env NOTIFY_HOST)
+//
+// The config file is the recommended way to keep secrets out of the shell
+// environment and to make the plugin work under any launcher (TUI, launchd,
+// GUI), since the plugin reads the file itself at load time.
 
 type Backend = "bark" | "ntfy"
 
@@ -28,12 +38,25 @@ function first(...vals: unknown[]): string | undefined {
   return undefined
 }
 
+async function loadConfigFile(): Promise<Options> {
+  const path = `${process.env.HOME}/.config/opencode-push.json`
+  try {
+    const file = Bun.file(path)
+    if (!(await file.exists())) return {}
+    return (await file.json()) as Options
+  } catch (err) {
+    console.error(`[opencode-push] failed to read ${path}:`, err)
+    return {}
+  }
+}
+
 const plugin: Plugin = async ({ directory }, options: Options = {}) => {
-  const backend = (first(options.backend, process.env.NOTIFY_BACKEND) as Backend) || "bark"
-  const barkUrl = first(options.bark_url, process.env.BARK_URL)?.replace(/\/+$/, "")
-  const ntfyUrl = first(options.ntfy_url, process.env.NTFY_URL)?.replace(/\/+$/, "")
-  const ntfyTopic = first(options.ntfy_topic, process.env.NTFY_TOPIC) || "opencode"
-  const host = first(options.host, process.env.NOTIFY_HOST) || ""
+  const cfg = await loadConfigFile()
+  const backend = (first(options.backend, process.env.NOTIFY_BACKEND, cfg.backend) as Backend) || "bark"
+  const barkUrl = first(options.bark_url, process.env.BARK_URL, cfg.bark_url)?.replace(/\/+$/, "")
+  const ntfyUrl = first(options.ntfy_url, process.env.NTFY_URL, cfg.ntfy_url)?.replace(/\/+$/, "")
+  const ntfyTopic = first(options.ntfy_topic, process.env.NTFY_TOPIC, cfg.ntfy_topic) || "opencode"
+  const host = first(options.host, process.env.NOTIFY_HOST, cfg.host) || ""
   const project = (directory || "").split("/").filter(Boolean).pop() || "opencode"
 
   async function send(title: string, body: string) {
