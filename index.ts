@@ -79,7 +79,7 @@ function projectName(directory: string | undefined): string {
 // so exactly one push goes out per finished turn.
 const STATE = Symbol.for("opencode-push.state")
 
-type SessionMeta = { project?: string; title?: string }
+type SessionMeta = { project?: string; title?: string; directory?: string }
 
 const MAX_TRACKED = 500
 
@@ -132,7 +132,7 @@ const plugin = {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ title: fullTitle, body, group: "opencode" }),
           })
-          log(`sent "${fullTitle}" -> ${res.status}`)
+          log(`sent "${fullTitle}" | ${body.replace(/\n/g, " / ")} -> ${res.status}`)
         } else if (cfg.backend === "ntfy") {
           if (!cfg.ntfyUrl) {
             log("NTFY_URL not set; skipping notification")
@@ -143,7 +143,7 @@ const plugin = {
             headers: { Title: fullTitle, Tags: "opencode" },
             body,
           })
-          log(`sent "${fullTitle}" -> ${res.status}`)
+          log(`sent "${fullTitle}" | ${body.replace(/\n/g, " / ")} -> ${res.status}`)
         } else {
           log(`unknown backend "${cfg.backend}"; skipping notification`)
         }
@@ -191,8 +191,20 @@ const plugin = {
           }
           meta.set(data.sessionID, {
             project: projectName(data?.location?.directory),
-            title: typeof data?.title === "string" ? data.title : undefined,
+            directory: typeof data?.location?.directory === "string" ? data.location.directory : undefined,
           })
+          trimBounded(meta)
+        }
+        return
+      }
+
+      // Auto-titling lags the turn (session.renamed fires after the first
+      // response), so track renames to keep the push informative.
+      if (type === "session.renamed") {
+        if (data?.sessionID && typeof data?.title === "string" && data.title.trim() !== "") {
+          const m = meta.get(data.sessionID) ?? {}
+          m.title = data.title
+          meta.set(data.sessionID, m)
           trimBounded(meta)
         }
         return
@@ -210,13 +222,49 @@ const plugin = {
         return
       }
 
-      const m = meta.get(sid)
-      const where = m?.project || here
-      const label = m?.title ? `${m.title} — ${where}` : where
+      let m = meta.get(sid)
+
+      // Sessions created before we owned the stream (e.g. a long-running TUI
+      // session) have no meta; fetch it from the server. This also catches
+      // subagents whose session.created we missed.
+      if (!m || (!m.title && !m.directory)) {
+        try {
+          const info = await ctx.session.get({ sessionID: sid })
+          if (info?.parentID && !cfg.includeSubagents) {
+            subagents.add(sid)
+            log(`skipped subagent session ${sid} (${type}, via lookup)`)
+            return
+          }
+          m = {
+            project: projectName(info?.location?.directory) || m?.project,
+            directory: typeof info?.location?.directory === "string" ? info.location.directory : m?.directory,
+            title: typeof info?.title === "string" && info.title.trim() !== "" ? info.title : m?.title,
+          }
+          meta.set(sid, m)
+          trimBounded(meta)
+        } catch (err: any) {
+          log(`session lookup failed for ${sid}: ${err?.message || err}`)
+        }
+      }
+
+      // Title tells you WHERE at a glance; body has the session name and the
+      // full directory (distinguishes worktree checkouts).
+      const project = m?.project || here
+      const name = m?.title ? `${m.title} — ` : ""
+      let body = m?.directory ? `${name}${m.directory}` : `${name}${project}`
+      if (failed) {
+        const errText =
+          typeof data?.error === "string"
+            ? data.error
+            : (data?.error?.message ?? data?.message)
+        if (typeof errText === "string" && errText.trim() !== "") {
+          body += `\n${errText.trim().slice(0, 300)}`
+        }
+      }
       if (succeeded) {
-        await send("opencode finished", `Turn complete — ${label}`)
+        await send(`opencode finished · ${project}`, body)
       } else {
-        await send("opencode errored", `Session error — ${label}`)
+        await send(`opencode errored · ${project}`, body)
       }
     }
 
