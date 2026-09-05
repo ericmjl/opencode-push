@@ -119,7 +119,7 @@ const plugin = {
 
     const here = projectName(ctx?.location?.directory || process.cwd())
 
-    async function send(title: string, body: string) {
+    async function send(title: string, body: string, sid = "unknown") {
       const fullTitle = cfg.host ? `${title} · ${cfg.host}` : title
       try {
         if (cfg.backend === "bark") {
@@ -132,7 +132,7 @@ const plugin = {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ title: fullTitle, body, group: "opencode" }),
           })
-          log(`sent "${fullTitle}" | ${body.replace(/\n/g, " / ")} -> ${res.status}`)
+          log(`sent ${sid} "${fullTitle}" | ${body.replace(/\n/g, " / ")} -> ${res.status}`)
         } else if (cfg.backend === "ntfy") {
           if (!cfg.ntfyUrl) {
             log("NTFY_URL not set; skipping notification")
@@ -143,7 +143,7 @@ const plugin = {
             headers: { Title: fullTitle, Tags: "opencode" },
             body,
           })
-          log(`sent "${fullTitle}" | ${body.replace(/\n/g, " / ")} -> ${res.status}`)
+          log(`sent ${sid} "${fullTitle}" | ${body.replace(/\n/g, " / ")} -> ${res.status}`)
         } else {
           log(`unknown backend "${cfg.backend}"; skipping notification`)
         }
@@ -215,12 +215,15 @@ const plugin = {
       if (!succeeded && !failed) return
 
       const sid: string = data?.sessionID || "unknown"
-      if (!shouldNotify(`${type}:${sid}`)) return
+      // failure events may arrive under both the v2 and legacy names; one push.
+      const dedupeType = succeeded ? "finished" : "failed"
+      if (!shouldNotify(`${dedupeType}:${sid}`)) return
 
       if (!cfg.includeSubagents && (subagents.has(sid) || data?.parentID)) {
         log(`skipped subagent session ${sid} (${type})`)
         return
       }
+      log(`notify main session ${sid} (${dedupeType})`)
 
       let m = meta.get(sid)
 
@@ -262,9 +265,9 @@ const plugin = {
         }
       }
       if (succeeded) {
-        await send(`opencode finished · ${project}`, body)
+        await send(`opencode finished · ${project}`, body, sid)
       } else {
-        await send(`opencode errored · ${project}`, body)
+        await send(`opencode errored · ${project}`, body, sid)
       }
     }
 
