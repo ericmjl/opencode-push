@@ -1,25 +1,35 @@
-import type { Plugin } from "@opencode-ai/plugin"
-
-// opencode-push: configurable push notifications for opencode.
-// Fires on session.idle (a turn finished) and session.error.
-// Backends: "bark" (Apple APNs via api.day.app) or "ntfy" (self-hosted ntfy.sh).
+// opencode-push — push notifications for OpenCode V2 (the `opencode2` beta
+// with the object/setup plugin API). Fires a push when a MAIN agent session
+// finishes its turn (or errors). Subagent (child) sessions are skipped by
+// default so background explore/Task runs don't buzz your phone.
+//
+// Backends: "bark" (Apple APNs via api.day.app) or "ntfy" (self-hosted ntfy).
+//
+// Events (opencode2 beta-18999 event bus, verified live):
+//   session.created              -> records parentID lineage (subagent marker)
+//   session.execution.succeeded  -> "finished" push (turn complete)
+//   session.execution.failed     -> "errored" push
+//   session.error                -> legacy alias, same as failed
+// Note: the old v1 names `session.idle` no longer exist on the V2 bus.
 //
 // Configuration precedence (highest first):
-//   1. Plugin options (npm install: ["opencode-push", {...}])
-//   2. Environment variables (see below)
+//   1. Plugin options (ctx.options, set via the `plugins` config tuple)
+//   2. Environment variables
 //   3. Config file (~/.config/opencode-push.json)
 //   4. Built-in defaults
 //
-// Keys (same names in plugin options, env vars, and the config file):
-//   backend     : "bark" | "ntfy"   (env NOTIFY_BACKEND, default "bark")
-//   bark_url    : e.g. https://api.day.app/<your-key>   (env BARK_URL)
-//   ntfy_url    : e.g. http://gb10                     (env NTFY_URL)
-//   ntfy_topic  : topic name                            (env NTFY_TOPIC, default "opencode")
-//   host        : label appended to the title, e.g. mac / gb10  (env NOTIFY_HOST)
+// Keys (same names in options, env vars, and the config file):
+//   backend           : "bark" | "ntfy"        (env NOTIFY_BACKEND, default "bark")
+//   bark_url          : https://api.day.app/<key>  (env BARK_URL)
+//   ntfy_url          : e.g. http://gb10       (env NTFY_URL)
+//   ntfy_topic        : topic name             (env NTFY_TOPIC, default "opencode")
+//   host              : label in the title, e.g. mac / gb10  (env NOTIFY_HOST)
+//   include_subagents : true to also push for subagent sessions (default false)
 //
-// The config file is the recommended way to keep secrets out of the shell
-// environment and to make the plugin work under any launcher (TUI, launchd,
-// GUI), since the plugin reads the file itself at load time.
+// Diagnostics: lifecycle and send results are appended to
+// ~/.config/opencode-push.log (a few lines per turn; delete at will).
+
+import { appendFileSync, readFileSync } from "node:fs"
 
 type Backend = "bark" | "ntfy"
 
@@ -29,6 +39,15 @@ type Options = {
   ntfy_url?: string
   ntfy_topic?: string
   host?: string
+  include_subagents?: boolean
+}
+
+const LOG_PATH = `${process.env.HOME}/.config/opencode-push.log`
+
+function log(msg: string) {
+  try {
+    appendFileSync(LOG_PATH, `${new Date().toISOString()} ${msg}\n`)
+  } catch {}
 }
 
 function first(...vals: unknown[]): string | undefined {
@@ -41,62 +60,199 @@ function first(...vals: unknown[]): string | undefined {
 async function loadConfigFile(): Promise<Options> {
   const path = `${process.env.HOME}/.config/opencode-push.json`
   try {
-    const file = Bun.file(path)
-    if (!(await file.exists())) return {}
-    return (await file.json()) as Options
-  } catch (err) {
-    console.error(`[opencode-push] failed to read ${path}:`, err)
+    return JSON.parse(readFileSync(path, "utf8")) as Options
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") {
+      log(`failed to read ${path}: ${err?.message || err}`)
+    }
     return {}
   }
 }
 
-const plugin: Plugin = async ({ directory }, options: Options = {}) => {
-  const cfg = await loadConfigFile()
-  const backend = (first(options.backend, process.env.NOTIFY_BACKEND, cfg.backend) as Backend) || "bark"
-  const barkUrl = first(options.bark_url, process.env.BARK_URL, cfg.bark_url)?.replace(/\/+$/, "")
-  const ntfyUrl = first(options.ntfy_url, process.env.NTFY_URL, cfg.ntfy_url)?.replace(/\/+$/, "")
-  const ntfyTopic = first(options.ntfy_topic, process.env.NTFY_TOPIC, cfg.ntfy_topic) || "opencode"
-  const host = first(options.host, process.env.NOTIFY_HOST, cfg.host) || ""
-  const project = (directory || "").split("/").filter(Boolean).pop() || "opencode"
+function projectName(directory: string | undefined): string {
+  return String(directory || "").split("/").filter(Boolean).pop() || "opencode"
+}
 
-  async function send(title: string, body: string) {
-    const fullTitle = host ? `${title} · ${host}` : title
-    try {
-      if (backend === "bark") {
-        if (!barkUrl) {
-          console.error("[opencode-push] BARK_URL not set; skipping notification")
-          return
-        }
-        await fetch(barkUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title: fullTitle, body, group: "opencode" }),
-        })
-      } else if (backend === "ntfy") {
-        if (!ntfyUrl) {
-          console.error("[opencode-push] NTFY_URL not set; skipping notification")
-          return
-        }
-        await fetch(`${ntfyUrl}/${ntfyTopic}`, {
-          method: "POST",
-          headers: { Title: fullTitle, Tags: "opencode" },
-          body,
-        })
-      }
-    } catch (err) {
-      console.error("[opencode-push] notification failed:", err)
+// One process, one active subscriber: every plugin instance (one per location)
+// sees every event on the bus, and the server fans each event out multiple
+// times (once per connected client). These global tables collapse that noise
+// so exactly one push goes out per finished turn.
+const STATE = Symbol.for("opencode-push.state")
+
+type SessionMeta = { project?: string; title?: string }
+
+const MAX_TRACKED = 500
+
+function trimBounded<T>(map: Map<string, T>) {
+  while (map.size > MAX_TRACKED) {
+    const oldest = map.keys().next().value
+    if (oldest === undefined) break
+    map.delete(oldest)
+  }
+}
+
+function sleepAbortable(ms: number, signal: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    const t = setTimeout(done, ms)
+    function done() {
+      signal.removeEventListener("abort", done)
+      clearTimeout(t)
+      resolve()
     }
-  }
+    signal.addEventListener("abort", done)
+  })
+}
 
-  return {
-    event: async ({ event }) => {
-      if (event.type === "session.idle") {
-        await send("opencode finished", `Turn complete in ${project}`)
-      } else if (event.type === "session.error") {
-        await send("opencode errored", `Session error in ${project}`)
+const plugin = {
+  id: "opencode-push",
+
+  async setup(ctx: any, options: Options = {}) {
+    const file = await loadConfigFile()
+    const cfg = {
+      backend: (first(options.backend, process.env.NOTIFY_BACKEND, file.backend) as Backend) || "bark",
+      barkUrl: first(options.bark_url, process.env.BARK_URL, file.bark_url)?.replace(/\/+$/, ""),
+      ntfyUrl: first(options.ntfy_url, process.env.NTFY_URL, file.ntfy_url)?.replace(/\/+$/, ""),
+      ntfyTopic: first(options.ntfy_topic, process.env.NTFY_TOPIC, file.ntfy_topic) || "opencode",
+      host: first(options.host, process.env.NOTIFY_HOST, file.host) || "",
+      includeSubagents: options.include_subagents ?? file.include_subagents ?? false,
+    }
+
+    const here = projectName(ctx?.location?.directory || process.cwd())
+
+    async function send(title: string, body: string) {
+      const fullTitle = cfg.host ? `${title} · ${cfg.host}` : title
+      try {
+        if (cfg.backend === "bark") {
+          if (!cfg.barkUrl) {
+            log("BARK_URL not set; skipping notification")
+            return
+          }
+          const res = await fetch(cfg.barkUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: fullTitle, body, group: "opencode" }),
+          })
+          log(`sent "${fullTitle}" -> ${res.status}`)
+        } else if (cfg.backend === "ntfy") {
+          if (!cfg.ntfyUrl) {
+            log("NTFY_URL not set; skipping notification")
+            return
+          }
+          const res = await fetch(`${cfg.ntfyUrl}/${cfg.ntfyTopic}`, {
+            method: "POST",
+            headers: { Title: fullTitle, Tags: "opencode" },
+            body,
+          })
+          log(`sent "${fullTitle}" -> ${res.status}`)
+        } else {
+          log(`unknown backend "${cfg.backend}"; skipping notification`)
+        }
+      } catch (err: any) {
+        log(`notification failed: ${err?.message || err}`)
       }
-    },
-  }
+    }
+
+    // Global claim + dedupe shared by every plugin instance in this process.
+    const g = globalThis as any
+    const state = (g[STATE] ??= {
+      controller: null as AbortController | null,
+      dedupe: new Map<string, number>(),
+      subagents: new Set<string>(),
+      meta: new Map<string, SessionMeta>(),
+    })
+    const { dedupe, subagents, meta } = state
+
+    if (state.controller) {
+      log(`setup skipped in ${here}: another instance already owns the event stream`)
+      return
+    }
+    const controller = new AbortController()
+    state.controller = controller
+    log(`setup in ${here} (backend=${cfg.backend}, host=${cfg.host || "none"})`)
+
+    const shouldNotify = (key: string): boolean => {
+      const now = Date.now()
+      const last = dedupe.get(key) || 0
+      if (now - last < 2000) return false
+      dedupe.set(key, now)
+      trimBounded(dedupe)
+      return true
+    }
+
+    const handle = async (ev: any) => {
+      const type: string = ev?.type
+      const data: any = ev?.properties ?? ev?.data ?? {}
+
+      if (type === "session.created") {
+        if (data?.sessionID) {
+          if (data?.parentID) {
+            subagents.add(data.sessionID)
+            if (subagents.size > MAX_TRACKED) subagents.delete(subagents.values().next().value)
+          }
+          meta.set(data.sessionID, {
+            project: projectName(data?.location?.directory),
+            title: typeof data?.title === "string" ? data.title : undefined,
+          })
+          trimBounded(meta)
+        }
+        return
+      }
+
+      const succeeded = type === "session.execution.succeeded" || type === "session.idle"
+      const failed = type === "session.execution.failed" || type === "session.error"
+      if (!succeeded && !failed) return
+
+      const sid: string = data?.sessionID || "unknown"
+      if (!shouldNotify(`${type}:${sid}`)) return
+
+      if (!cfg.includeSubagents && (subagents.has(sid) || data?.parentID)) {
+        log(`skipped subagent session ${sid} (${type})`)
+        return
+      }
+
+      const m = meta.get(sid)
+      const where = m?.project || here
+      const label = m?.title ? `${m.title} — ${where}` : where
+      if (succeeded) {
+        await send("opencode finished", `Turn complete — ${label}`)
+      } else {
+        await send("opencode errored", `Session error — ${label}`)
+      }
+    }
+
+    // Self-healing subscription: if the stream errors or ends while we are
+    // still loaded, release the claim and resubscribe (the previous plugin's
+    // fire-once claim is what silenced it permanently after an update).
+    void (async () => {
+      let backoff = 1000
+      while (!controller.signal.aborted) {
+        try {
+          for await (const ev of ctx.event.subscribe({ signal: controller.signal })) {
+            backoff = 1000
+            try {
+              await handle(ev)
+            } catch (err: any) {
+              log(`handler error: ${err?.message || err}`)
+            }
+          }
+          break
+        } catch (err: any) {
+          if (controller.signal.aborted) break
+          log(`event stream error: ${err?.message || err}; resubscribing in ${backoff}ms`)
+          await sleepAbortable(backoff, controller.signal)
+          backoff = Math.min(backoff * 2, 30000)
+        }
+      }
+      if (state.controller === controller) state.controller = null
+      if (!controller.signal.aborted) log("event stream ended")
+    })()
+
+    return () => {
+      controller.abort()
+      if (state.controller === controller) state.controller = null
+      log(`cleanup in ${here}`)
+    }
+  },
 }
 
 export default plugin
