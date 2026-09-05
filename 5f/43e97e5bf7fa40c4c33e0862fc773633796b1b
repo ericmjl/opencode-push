@@ -1,0 +1,14 @@
+index.ts
+  h_923f9eef54c2c1 122,135,146,218-220,226,268,270
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "5f43e97e5bf7fa40c4c33e0862fc773633796b1b",
+  "prompts": {},
+  "humans": {
+    "h_923f9eef54c2c1": {
+      "author": "Eric Ma <ericmajinglong@gmail.com>"
+    }
+  }
+}
