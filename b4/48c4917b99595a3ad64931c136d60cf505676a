@@ -1,0 +1,24 @@
+README.md
+  h_923f9eef54c2c1 7-9,26-43,71,82,87,98-100,112-114,171-178
+config.example.json
+  h_923f9eef54c2c1 5-7
+docs/designs/url-notifications/LLD.md
+  h_923f9eef54c2c1 1-157
+docs/designs/url-notifications/url-capture-EARS.md
+  h_923f9eef54c2c1 1-71
+docs/high-level-design.md
+  h_923f9eef54c2c1 1-154
+index.ts
+  h_923f9eef54c2c1 6-11,34-37,53-54,72-90,137-293,306-316,321-322,333-340,350-356,384-387,469-483,498-501,503,505,507-510
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "b448c4917b99595a3ad64931c136d60cf505676a",
+  "prompts": {},
+  "humans": {
+    "h_923f9eef54c2c1": {
+      "author": "Eric Ma <ericmajinglong@gmail.com>"
+    }
+  }
+}
