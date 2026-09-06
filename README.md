@@ -4,7 +4,9 @@ A configurable push-notification plugin for [OpenCode](https://opencode.ai) V2
 (the `opencode2` beta with the object/`setup` plugin API). Get a push on your
 phone when a **main agent session** finishes its turn (or errors out) —
 subagent runs are skipped by default so background explore/Task work doesn't
-buzz you.
+buzz you. URLs in the agent's final reply (a dev server on a Tailscale IP, a
+GitHub PR, ...) ride along in the push body, and tapping the notification
+opens the first non-local one.
 
 Two backends:
 
@@ -20,6 +22,24 @@ The plugin subscribes to the opencode2 event bus via `ctx.event.subscribe()`:
 - `session.execution.failed` (and legacy `session.error`) -> "errored" push
 - `session.created` -> records `parentID` lineage, used to skip subagent
   sessions (any session with a parent is a subagent run)
+
+### URL capture
+
+When a turn ends, the plugin fetches the session's messages from the
+opencode server's HTTP API (service URL + credentials discovered from the
+local `service.json`) and scans the **final assistant message** for
+`http(s)` URLs:
+
+- URLs are appended to the push body, one per line (deduped, capped at
+  `max_urls`, default 3).
+- The tap-through target (Bark `url` field per the official
+  [API V2 docs](https://github.com/Finb/bark-server/blob/master/docs/API_V2.md);
+  ntfy `Click` header) is the first URL whose host is **not**
+  `localhost`/`127.0.0.1`/`::1` — a localhost link is dead on a phone, the
+  Tailscale IP URL is the one worth tapping.
+- Best-effort: if the messages fetch fails, the push still goes out,
+  without URLs. Capture never fires extra pushes.
+- Disable with `include_urls: false`.
 
 Notes from live testing on `opencode2 v0.0.0-beta-18999`:
 
@@ -48,7 +68,7 @@ changes) after installing.
 
 > Install as `.ts`. A `.js` copy is parsed as plain JavaScript and the
 > TypeScript annotations will fail to build.
-
+>
 > This build targets the V2 plugin API only. V1 (`opencode` 1.x) plugins use a
 > different contract and won't load on `opencode2`; see the
 > [migration guide](https://opencode.ai/v2/docs/migrate-v1).
@@ -59,12 +79,12 @@ Configuration is read with the following precedence (highest first):
 
 1. **Plugin options** (`ctx.options`, via the `plugins` config tuple)
 2. **Environment variables** (`BARK_URL`, `NTFY_URL`, `NTFY_TOPIC`,
-   `NOTIFY_BACKEND`, `NOTIFY_HOST`)
+   `NOTIFY_BACKEND`, `NOTIFY_HOST`, `INCLUDE_URLS`, `MAX_URLS`)
 3. **Config file** (`~/.config/opencode-push.json`)
 4. Built-in defaults
 
 All sources use the same key names: `backend`, `bark_url`, `ntfy_url`,
-`ntfy_topic`, `host`, `include_subagents`.
+`ntfy_topic`, `host`, `include_subagents`, `include_urls`, `max_urls`.
 
 ### Config file (recommended)
 
@@ -75,7 +95,9 @@ Create `~/.config/opencode-push.json` (mode 600):
   "backend": "bark",
   "bark_url": "https://api.day.app/<your-key>",
   "host": "mac",
-  "include_subagents": false
+  "include_subagents": false,
+  "include_urls": true,
+  "max_urls": 3
 }
 ```
 
@@ -86,6 +108,9 @@ from that shell; the opencode2 background service may or may not inherit them.
 
 `include_subagents` (default `false`) also pushes for subagent sessions when
 set to `true`.
+
+`include_urls` (default `true`) captures URLs from the agent's final reply;
+`max_urls` (default `3`, clamped to 1-10) caps how many appear per push.
 
 ### Environment variables
 
@@ -142,6 +167,14 @@ file (`~/.config/opencode-push.json`) for that.
   from a self-hosted ntfy server, configure ntfy's `upstream-base-url`.
 - The plugin has no runtime dependencies (it uses `node:fs` and native
   `fetch`), so the single-file install needs no `bun install`.
+
+## Design docs
+
+The project follows a design-driven workflow; the intent chain lives in-repo:
+
+- [High-Level Design](docs/high-level-design.md)
+- [URL Notifications LLD](docs/designs/url-notifications/LLD.md) +
+  [EARS](docs/designs/url-notifications/url-capture-EARS.md)
 
 ## License
 

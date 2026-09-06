@@ -2,5 +2,7 @@
   "backend": "bark",
   "bark_url": "https://api.day.app/REPLACE_WITH_YOUR_KEY",
   "host": "mac",
-  "include_subagents": false
+  "include_subagents": false,
+  "include_urls": true,
+  "max_urls": 3
 }
